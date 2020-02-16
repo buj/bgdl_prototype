@@ -235,23 +235,61 @@ substituteMany mapping tgt = termMergeLambdas $ _substituteMany mapping (termRep
 termSubMany :: Term -> Map.Map Variable Term -> Term
 termSubMany = flip substituteMany
 
+
+
+-- pattern matching
+
+data PmState = PmState {
+  pmFvars :: VarSet,
+  pmMapping :: Map.Map Variable Term
+} deriving Show
+
+pmInit :: VarSet -> PmState
+pmInit vars = PmState vars Map.empty
+
+updatePm :: Variable -> Term -> PmState -> Maybe PmState
+updatePm v t pm@(PmState fvars0 mapping0)
+  | not (v `Set.member` fvars0) = Just pm
+  | not (v `Map.member` mapping0) = Just $ pm { pmMapping = Map.insert v t mapping0 }
+  | otherwise =
+      let t2 = mapping0 Map.! v
+      in if t `alphaEq` t2 then Just pm else Nothing
+
+_patternMatch :: Term -> Term -> PmState -> Maybe PmState
+_patternMatch (Term_Var name1 i1) t2 = updatePm (Var name1 i1) t2
+_patternMatch (Term_Atom name1) (Term_Atom name2)
+  | (name1 == name2) = Just
+  | otherwise = const Nothing
+_patternMatch (Term_Comp subs1) (Term_Comp subs2)
+  | (length subs1 == length subs2) =
+      \pm -> foldl (>>=) (Just pm) $ map (uncurry _patternMatch) (zip subs1 subs2)
+  | otherwise = const Nothing
+_patternMatch (Term_Lambda vars1 sub1) (Term_Lambda vars2 sub2)
+  | (Set.size vars1 == Set.size vars2) = _patternMatch sub1 sub2
+  | otherwise = const Nothing
+_patternMatch _ _ = const Nothing
+
+patternMatch :: Term -> Term -> Maybe (Map.Map Variable Term)
+patternMatch t1 t2 = do
+  let t1' = termNormalize t1
+      t2' = termNormalize t2
+  pm <- _patternMatch t1' t2' (pmInit $ termFreeVars t1')
+  let mapping = pmMapping pm
+      t1'' = termSubMany t1' mapping
+  if t1'' `alphaEq` t2'
+    then Just mapping
+    else Nothing
+
 {-
-
--- term pattern matching (0) / unification (1)
-
-containsVar :: Variable -> Term -> Bool
-containsVar v t =
-  case t of
-    Term_Var _ _    -> (Just v == termToVar t)
-    Term_Comp subs  -> or $ map (containsVar v) subs
-    _               -> False
+-- unification
 
 occursCheck :: Variable -> Term -> Bool
 occursCheck v t
   | (Just v == termToVar t) = False
-  | otherwise = containsVar v t
+  | otherwise = v `Set.member` termFreeVars t
 
 data EqState = EqState {
+  freeVars :: VarSet,
   eqs :: Seq.Seq (Term, Term),
   mapping :: Map.Map Variable Term,
   failed :: Bool
