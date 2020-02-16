@@ -16,7 +16,12 @@ import MyUtil
 
 data Atom = Atom { atomId :: String } deriving (Eq, Ord)
 data Variable = Var { varName :: String, varIndex :: Int } deriving (Eq, Ord)
-data Term = Term_Var String Int | Term_Atom String | Term_Comp [Term] deriving Eq
+data Term =
+  Term_Var String Int |
+  Term_Atom String |
+  Term_Comp [Term] |
+  Term_Lambda (Set.Set Variable) Term
+  deriving (Eq, Ord)
 
 
 varToTerm :: Variable -> Term
@@ -45,6 +50,13 @@ termIsComp :: Term -> Bool
 termIsComp (Term_Comp _) = True
 termIsComp _ = False
 
+termIsLambda :: Term -> Bool
+termIsLambda (Term_Lambda _ _) = True
+termIsLambda _ = False
+
+varNextIndex :: Variable -> Variable
+varNextIndex (Var name i) = (Var name (i+1))
+
 
 instance Show Variable where
   show (Var name i) = "?" ++ name ++ "_" ++ show i
@@ -56,17 +68,152 @@ instance Show Term where
   show t@(Term_Var _ _) = show (fromJust $ termToVar t)
   show t@(Term_Atom _) = show (fromJust $ termToAtom t)
   show (Term_Comp subs) = "(" ++ (unwords $ map show subs) ++ ")"
+  show (Term_Lambda vars sub) = "\\" ++ (show $ Set.elems vars) ++ "." ++ show sub 
 
 
 
 -- term structure manipulation/inspection
 
+type VarSet = Set.Set Variable
+type VarBank = Map.Map String Int
+
+termMergeLambdas :: Term -> Term
+termMergeLambdas (Term_Lambda vars1 (Term_Lambda vars2 sub)) = Term_Lambda (vars1 `Set.union` vars2) sub
+termMergeLambdas (Term_Lambda vars sub) = Term_Lambda vars $ termMergeLambdas sub
+termMergeLambdas (Term_Comp subs) = Term_Comp $ map termMergeLambdas subs
+termMergeLambdas t = t
+
+termFreeVars :: Term -> VarSet
+termFreeVars (Term_Var name i) = Set.singleton $ Var name i
+termFreeVars (Term_Atom _) = Set.empty
+termFreeVars (Term_Comp subs) = foldl Set.union Set.empty $ map termFreeVars subs
+termFreeVars (Term_Lambda vars sub) = termFreeVars sub `Set.difference` vars
+
+
+vbGetNext :: VarBank -> String -> Variable
+vbGetNext vb name = Var name $ Map.findWithDefault 0 name vb
+
+vbMax :: VarBank -> Variable -> VarBank
+vbMax vb (Var name i) = Map.insertWith max name i vb
+
+vbRegister :: VarBank -> Variable -> VarBank
+vbRegister vb = vbMax vb . varNextIndex
+
+vbMerge :: VarBank -> VarBank -> VarBank
+vbMerge vb1 vb2 = foldl vbMax Map.empty (map (uncurry Var) $ Map.assocs vb1 ++ Map.assocs vb2)
+
+getFirstUnusedIndices :: VarSet -> VarBank
+getFirstUnusedIndices vars = Set.foldl vbRegister Map.empty vars
+
+
+type VarMap = Map.Map Variable Variable
+
+data TminState = TminState { tminVb :: VarBank, tminMapping :: VarMap }
+
+vbToTs :: VarBank -> TminState
+vbToTs vb = TminState vb Map.empty
+
+tsMinimizeIndices :: TminState -> Term -> Term
+tsMinimizeIndices ts0@(TminState vb0 mapping0) t =
+  case t of
+    Term_Var name i       ->
+      let v = Var name i
+      in varToTerm $ Map.findWithDefault v v mapping0
+    Term_Atom _           -> t
+    Term_Comp subs        -> Term_Comp $ map (tsMinimizeIndices ts0) subs
+    Term_Lambda vars sub  ->
+      let unVars = vars `Set.difference` (Map.keysSet mapping0)
+          ts1 = Set.foldl (
+                  \ts@(TminState vb mapping) v@(Var name _) ->
+                  let img = vb `vbGetNext` name
+                  in TminState (vb `vbRegister` img) (Map.insert v img mapping)
+                ) ts0 vars
+          vars1 = Set.map ((Map.!) $ tminMapping ts1) vars
+      in Term_Lambda vars1 $ tsMinimizeIndices ts1 sub
+
+termMinimizeIndices :: Term -> Term
+termMinimizeIndices t = tsMinimizeIndices (vbToTs . getFirstUnusedIndices . termFreeVars $ t) t
+
+termRepel :: Term -> Term -> Term
+termRepel t1 t2 = tsMinimizeIndices (vbToTs (getFirstUnusedIndices $ termFreeVars t1 `Set.union` termFreeVars t2)) t2
+
+
+data AlphaState = AState {
+  asLbound :: VarSet, asRbound :: VarSet,
+  asLmap :: VarMap, asRmap :: VarMap
+}
+
+asInit :: AlphaState
+asInit = AState Set.empty Set.empty Map.empty Map.empty
+
+asAddBounds :: VarSet -> VarSet -> AlphaState -> AlphaState
+asAddBounds lset rset as@(AState lb0 rb0 _ _) =
+  as {
+    asLbound = lb0 `Set.union` lset,
+    asRbound = rb0 `Set.union` rset
+  }
+
+asUpdate :: Variable -> Variable -> AlphaState -> Maybe AlphaState
+asUpdate v1 v2 as@(AState lb0 rb0 lmap0 rmap0)
+  | not (v1bound == v2bound) = Nothing
+  | not (v1bound && v2bound) = if v1 == v2 then Just as else Nothing
+  -- remaining case: v1 bound && v2 bound
+  | (not (v1 `Map.member` lmap0) && not (v2 `Map.member` rmap0)) =
+      Just $ as {
+              asLmap = Map.insert v1 v2 lmap0,
+              asRmap = Map.insert v2 v1 rmap0
+            }
+  | (v1 `Map.member` lmap0) =
+      if (lmap0 Map.! v1) == v2
+        then Just as
+        else Nothing
+  | otherwise = Nothing
+  where v1bound = v1 `Set.member` lb0
+        v2bound = v2 `Set.member` rb0
+
+
+-- alphaEquivalence where we assume that all bound variables are distinct
+_alphaEq :: Term -> Term -> AlphaState -> Maybe AlphaState
+_alphaEq t1 t2 as =
+  case (t1, t2) of
+    (Term_Var name1 i1, Term_Var name2 i2)    -> asUpdate (Var name1 i1) (Var name2 i2) as
+    (Term_Atom name1, Term_Atom name2)        -> if name1 == name2 then Just as else Nothing
+    (Term_Comp subs1, Term_Comp subs2)        ->
+      if not (length subs1 == length subs2) then Nothing
+      else
+      let actions = map (uncurry _alphaEq) $ zip subs1 subs2
+      in foldl (>>=) (Just as) actions
+    (Term_Lambda vars1 sub1, Term_Lambda vars2 sub2)  -> _alphaEq sub1 sub2 $ asAddBounds vars1 vars2 as
+    _                                         -> Nothing
+
+alphaEq :: Term -> Term -> Bool
+alphaEq t1 t2 =
+  let t1' = termMinimizeIndices t1
+      t2' = t1 `termRepel` t2
+  in isJust $ _alphaEq t1' t2' asInit
+
+
+{-
+
+alphaEq :: Term -> Term -> Bool
+alphaEq (Term_Lambda vars1 sub1) (Term_Lambda vars2 sub2)
+  | not (Set.length vars1 == Set.length vars2) = False
+  | 
+
 substitute :: Variable -> Term -> Term -> Term
 substitute v t tgt =
   case tgt of
-    Term_Var _ _    -> if (Just v == termToVar t) then t else tgt
-    Term_Atom _     -> tgt
-    Term_Comp subs  -> Term_Comp $ map (substitute v t) subs
+    Term_Var _ _          -> if (Just v == termToVar t) then t else tgt
+    Term_Atom _           -> tgt
+    Term_Comp subs        -> Term_Comp $ map (substitute v t) subs
+    Term_Lambda vars sub  ->
+      if v `Set.member` vars
+        then tgt
+        else Term_Lambda vars $ substitute v t sub
+
+rename :: Variable -> Variable -> Term -> Term
+rename v1 v2 (Term_Lambda vars sub)
+  | 
 
 termSub :: Term -> Variable -> Term -> Term
 termSub tgt v t = substitute v t tgt
@@ -74,9 +221,12 @@ termSub tgt v t = substitute v t tgt
 substituteMany :: Map.Map Variable Term -> Term -> Term
 substituteMany mapping tgt =
   case tgt of
-    Term_Var name i -> Map.findWithDefault tgt (Var name i) mapping
-    Term_Atom _     -> tgt
-    Term_Comp subs  -> Term_Comp $ map (substituteMany mapping) subs
+    Term_Var name i       -> Map.findWithDefault tgt (Var name i) mapping
+    Term_Atom _           -> tgt
+    Term_Comp subs        -> Term_Comp $ map (substituteMany mapping) subs
+    Term_Lambda vars sub  ->
+      let mapping1 = Set.foldr Map.delete mapping vars
+      in Term_Lambda vars $ substituteMany mapping1 sub
 
 termSubMany :: Term -> Map.Map Variable Term -> Term
 termSubMany = flip substituteMany
@@ -231,6 +381,8 @@ unify left right = unifyMany [(left, right)]
 patternMatch :: Term -> Term -> EqMapping
 patternMatch left right = patternMatchMany [(left, right)]
 
+-}
+
 
 -- test instances
 
@@ -294,3 +446,68 @@ term7 =
     Term_Var "X" 0,
     Term_Var "X" 2
   ]
+
+term8 =
+  Term_Lambda (Set.fromList [Var "X" 0, Var "Y" 2]) $
+    Term_Comp [
+      Term_Var "X" 0,
+      Term_Var "Y" 2,
+      Term_Lambda (Set.fromList [Var "Y" 2])$
+        Term_Comp [
+          Term_Atom "ahoj",
+          Term_Var "Y" 2,
+          Term_Var "Z" 0
+        ]
+    ]
+
+term9 =
+  Term_Lambda (Set.fromList [Var "X" 0, Var "Y" 2]) $
+    Term_Comp [
+      Term_Var "X" 0,
+      Term_Var "Y" 2,
+      Term_Lambda (Set.fromList [Var "Z" 4]) $
+        Term_Comp [
+          Term_Atom "ahoj",
+          Term_Var "Z" 4,
+          Term_Var "Z" 0
+        ]
+    ]
+
+term10 =
+  Term_Lambda (Set.fromList [Var "X" 0, Var "Y" 2]) $
+    Term_Comp [
+      Term_Atom "haha",
+      Term_Var "Y" 2,
+      Term_Lambda (Set.fromList [Var "Z" 4]) $
+        Term_Comp [
+          Term_Atom "ahoj",
+          Term_Var "Z" 4,
+          Term_Var "Z" 0
+        ]
+    ]
+
+term11 =
+  Term_Lambda (Set.fromList [Var "X" 0, Var "Y" 2]) $
+    Term_Comp [
+      Term_Var "X" 0,
+      Term_Var "Y" 2,
+      Term_Lambda (Set.fromList [Var "Z" 4]) $
+        Term_Comp [
+          Term_Atom "ahoj",
+          Term_Var "Z" 4,
+          Term_Atom "koniec"
+        ]
+    ]
+
+term12 =
+  Term_Lambda (Set.fromList [Var "X" 0, Var "Y" 2, Var "Z" 0]) $
+    Term_Comp [
+      Term_Var "X" 0,
+      Term_Var "Y" 2,
+      Term_Lambda (Set.fromList [Var "Y" 2])$
+        Term_Comp [
+          Term_Atom "ahoj",
+          Term_Var "Y" 2,
+          Term_Var "Z" 0
+        ]
+    ]
