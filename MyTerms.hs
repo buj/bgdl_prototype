@@ -12,6 +12,7 @@ import qualified Data.Sequence as Seq
 import MyUtil
 
 
+
 -- basic definitions
 
 data Atom = Atom { atomId :: String } deriving (Eq, Ord)
@@ -134,9 +135,15 @@ tsMinimizeIndices ts0@(TminState vb0 mapping0) t =
 termMinimizeIndices :: Term -> Term
 termMinimizeIndices t = tsMinimizeIndices (vbToTs . getFirstUnusedIndices . termFreeVars $ t) t
 
-termRepel :: Term -> Term -> Term
-termRepel t1 t2 = tsMinimizeIndices (vbToTs (getFirstUnusedIndices $ termFreeVars t1 `Set.union` termFreeVars t2)) t2
+termNormalize :: Term -> Term
+termNormalize = termMergeLambdas . termMinimizeIndices
 
+termRepel :: [Term] -> Term -> Term
+termRepel ts tgt = tsMinimizeIndices (vbToTs $ getFirstUnusedIndices (Set.unions $ map termFreeVars (tgt:ts))) tgt
+
+
+
+-- alpha equivalence
 
 data AlphaState = AState {
   asLbound :: VarSet, asRbound :: VarSet,
@@ -146,15 +153,15 @@ data AlphaState = AState {
 asInit :: AlphaState
 asInit = AState Set.empty Set.empty Map.empty Map.empty
 
-asAddBounds :: VarSet -> VarSet -> AlphaState -> AlphaState
-asAddBounds lset rset as@(AState lb0 rb0 _ _) =
+asAddBounds :: AlphaState -> VarSet -> VarSet -> AlphaState
+asAddBounds as@(AState lb0 rb0 _ _) lset rset =
   as {
     asLbound = lb0 `Set.union` lset,
     asRbound = rb0 `Set.union` rset
   }
 
-asUpdate :: Variable -> Variable -> AlphaState -> Maybe AlphaState
-asUpdate v1 v2 as@(AState lb0 rb0 lmap0 rmap0)
+asUpdate :: AlphaState -> Variable -> Variable -> Maybe AlphaState
+asUpdate as@(AState lb0 rb0 lmap0 rmap0) v1 v2
   | not (v1bound == v2bound) = Nothing
   | not (v1bound && v2bound) = if v1 == v2 then Just as else Nothing
   -- remaining case: v1 bound && v2 bound
@@ -171,55 +178,49 @@ asUpdate v1 v2 as@(AState lb0 rb0 lmap0 rmap0)
   where v1bound = v1 `Set.member` lb0
         v2bound = v2 `Set.member` rb0
 
-
 -- alphaEquivalence where we assume that all bound variables are distinct
 _alphaEq :: Term -> Term -> AlphaState -> Maybe AlphaState
 _alphaEq t1 t2 as =
   case (t1, t2) of
-    (Term_Var name1 i1, Term_Var name2 i2)    -> asUpdate (Var name1 i1) (Var name2 i2) as
+    (Term_Var name1 i1, Term_Var name2 i2)    -> asUpdate as (Var name1 i1) (Var name2 i2)
     (Term_Atom name1, Term_Atom name2)        -> if name1 == name2 then Just as else Nothing
     (Term_Comp subs1, Term_Comp subs2)        ->
       if not (length subs1 == length subs2) then Nothing
       else
       let actions = map (uncurry _alphaEq) $ zip subs1 subs2
       in foldl (>>=) (Just as) actions
-    (Term_Lambda vars1 sub1, Term_Lambda vars2 sub2)  -> _alphaEq sub1 sub2 $ asAddBounds vars1 vars2 as
+    (Term_Lambda vars1 sub1, Term_Lambda vars2 sub2)  -> _alphaEq sub1 sub2 $ asAddBounds as vars1 vars2
     _                                         -> Nothing
 
 alphaEq :: Term -> Term -> Bool
 alphaEq t1 t2 =
   let t1' = termMinimizeIndices t1
-      t2' = t1 `termRepel` t2
+      t2' = termRepel [t1] t2
   in isJust $ _alphaEq t1' t2' asInit
 
 
-{-
 
-alphaEq :: Term -> Term -> Bool
-alphaEq (Term_Lambda vars1 sub1) (Term_Lambda vars2 sub2)
-  | not (Set.length vars1 == Set.length vars2) = False
-  | 
+-- substitution (for free variables)
 
-substitute :: Variable -> Term -> Term -> Term
-substitute v t tgt =
+_substitute :: Variable -> Term -> Term -> Term
+_substitute v t tgt =
   case tgt of
-    Term_Var _ _          -> if (Just v == termToVar t) then t else tgt
+    Term_Var name i       -> if (v == Var name i) then t else tgt
     Term_Atom _           -> tgt
-    Term_Comp subs        -> Term_Comp $ map (substitute v t) subs
+    Term_Comp subs        -> Term_Comp $ map (_substitute v t) subs
     Term_Lambda vars sub  ->
       if v `Set.member` vars
         then tgt
-        else Term_Lambda vars $ substitute v t sub
+        else Term_Lambda vars $ _substitute v t sub
 
-rename :: Variable -> Variable -> Term -> Term
-rename v1 v2 (Term_Lambda vars sub)
-  | 
+substitute :: Variable -> Term -> Term -> Term
+substitute v t tgt = termMergeLambdas $ _substitute v t (termRepel [t] tgt)
 
 termSub :: Term -> Variable -> Term -> Term
 termSub tgt v t = substitute v t tgt
 
-substituteMany :: Map.Map Variable Term -> Term -> Term
-substituteMany mapping tgt =
+_substituteMany :: Map.Map Variable Term -> Term -> Term
+_substituteMany mapping tgt =
   case tgt of
     Term_Var name i       -> Map.findWithDefault tgt (Var name i) mapping
     Term_Atom _           -> tgt
@@ -228,61 +229,13 @@ substituteMany mapping tgt =
       let mapping1 = Set.foldr Map.delete mapping vars
       in Term_Lambda vars $ substituteMany mapping1 sub
 
+substituteMany :: Map.Map Variable Term -> Term -> Term
+substituteMany mapping tgt = termMergeLambdas $ _substituteMany mapping (termRepel (Map.elems mapping) tgt)
+
 termSubMany :: Term -> Map.Map Variable Term -> Term
 termSubMany = flip substituteMany
 
-
-type VarCollection = Map.Map String (Set.Set Int)
-
-addVarsFrom :: Term -> VarCollection -> VarCollection
-addVarsFrom (Term_Var name i) =
-  (Map.adjust (Set.insert i) name) . (Map.insertWith (flip const) name Set.empty)
-addVarsFrom (Term_Atom _) = id
-addVarsFrom (Term_Comp subs) =
-  \vc -> foldl vcCollect vc subs
-
-vcCollect :: VarCollection -> Term -> VarCollection
-vcCollect = flip addVarsFrom
-
-termGetVc :: Term -> VarCollection
-termGetVc t = addVarsFrom t Map.empty
-
-
-vcVarMaxIndices :: VarCollection -> Map.Map String Int
-vcVarMaxIndices = Map.map (fromJust . Set.lookupMax)
-
-termVarMaxIndices :: Term -> Map.Map String Int
-termVarMaxIndices = vcVarMaxIndices . termGetVc
-
-
-setIntGetCompressLs :: Set.Set Int -> [(Int, Int)]
-setIntGetCompressLs s = map swap (indexed $ Set.elems s)
-
-vcGetCompressMap :: VarCollection -> Map.Map Variable Variable
-vcGetCompressMap vc =
-  let ls1 = Map.assocs $ Map.map setIntGetCompressLs vc
-      ls2 = ls1 >>= (\(name, iis) -> map (\(i, j) -> (Var name i, Var name j)) iis)
-  in Map.fromAscList ls2
-
-termGetCompressMap :: Term -> Map.Map Variable Variable
-termGetCompressMap = vcGetCompressMap . termGetVc
-
-termCompressVars :: Term -> Term
-termCompressVars t =
-  let vc = termGetVc t
-      mapping = Map.map varToTerm $ vcGetCompressMap vc
-  in substituteMany mapping t
-
-
-separateTerms :: Term -> Term -> (Term, Term)
-separateTerms t1 t2 =
-  let t1' = termCompressVars t1
-      t1'vmi = termVarMaxIndices t1
-      t2map = termGetCompressMap t2
-      t2map' = Map.map (\(Var name i) -> Term_Var name $ i + (Map.findWithDefault 0 name t1'vmi)) t2map
-      t2' = substituteMany t2map' t2
-  in (t1', t2')
-
+{-
 
 -- term pattern matching (0) / unification (1)
 
