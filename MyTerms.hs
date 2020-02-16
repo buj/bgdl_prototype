@@ -4,6 +4,7 @@ import Control.Monad
 import Control.Monad.Fix
 import Data.List.Index
 import Data.Maybe
+import Data.Ord
 import Data.Tuple
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -22,7 +23,6 @@ data Term =
   Term_Atom String |
   Term_Comp [Term] |
   Term_Lambda (Set.Set Variable) Term
-  deriving (Eq, Ord)
 
 
 varToTerm :: Variable -> Term
@@ -90,6 +90,26 @@ termFreeVars (Term_Atom _) = Set.empty
 termFreeVars (Term_Comp subs) = foldl Set.union Set.empty $ map termFreeVars subs
 termFreeVars (Term_Lambda vars sub) = termFreeVars sub `Set.difference` vars
 
+termClosure :: Term -> Term
+termClosure t
+  | (Set.size fvars == 0) = t
+  | otherwise = Term_Lambda fvars t
+  where fvars = termFreeVars t
+
+termIsGround :: Term -> Bool
+termIsGround t = Set.size (termFreeVars t) == 0
+
+termOnlyGround :: Term -> Maybe Term
+termOnlyGround t
+  | (termIsGround t) = Just t
+  | otherwise = Nothing
+
+type TermKey = [Maybe Term]
+
+termSignature :: Term -> TermKey
+termSignature (Term_Comp subs) = map termOnlyGround subs
+termSignature _ = []
+
 
 vbGetNext :: VarBank -> String -> Variable
 vbGetNext vb name = Var name $ Map.findWithDefault 0 name vb
@@ -136,71 +156,14 @@ termMinimizeIndices :: Term -> Term
 termMinimizeIndices t = tsMinimizeIndices (vbToTs . getFirstUnusedIndices . termFreeVars $ t) t
 
 termNormalize :: Term -> Term
-termNormalize = termMergeLambdas . termMinimizeIndices
+termNormalize = termMinimizeIndices . termMergeLambdas
 
 termRepel :: [Term] -> Term -> Term
 termRepel ts tgt = tsMinimizeIndices (vbToTs $ getFirstUnusedIndices (Set.unions $ map termFreeVars (tgt:ts))) tgt
 
 
 
--- alpha equivalence
-
-data AlphaState = AState {
-  asLbound :: VarSet, asRbound :: VarSet,
-  asLmap :: VarMap, asRmap :: VarMap
-}
-
-asInit :: AlphaState
-asInit = AState Set.empty Set.empty Map.empty Map.empty
-
-asAddBounds :: AlphaState -> VarSet -> VarSet -> AlphaState
-asAddBounds as@(AState lb0 rb0 _ _) lset rset =
-  as {
-    asLbound = lb0 `Set.union` lset,
-    asRbound = rb0 `Set.union` rset
-  }
-
-asUpdate :: AlphaState -> Variable -> Variable -> Maybe AlphaState
-asUpdate as@(AState lb0 rb0 lmap0 rmap0) v1 v2
-  | not (v1bound == v2bound) = Nothing
-  | not (v1bound && v2bound) = if v1 == v2 then Just as else Nothing
-  -- remaining case: v1 bound && v2 bound
-  | (not (v1 `Map.member` lmap0) && not (v2 `Map.member` rmap0)) =
-      Just $ as {
-              asLmap = Map.insert v1 v2 lmap0,
-              asRmap = Map.insert v2 v1 rmap0
-            }
-  | (v1 `Map.member` lmap0) =
-      if (lmap0 Map.! v1) == v2
-        then Just as
-        else Nothing
-  | otherwise = Nothing
-  where v1bound = v1 `Set.member` lb0
-        v2bound = v2 `Set.member` rb0
-
--- alphaEquivalence where we assume that all bound variables are distinct
-_alphaEq :: Term -> Term -> AlphaState -> Maybe AlphaState
-_alphaEq t1 t2 as =
-  case (t1, t2) of
-    (Term_Var name1 i1, Term_Var name2 i2)    -> asUpdate as (Var name1 i1) (Var name2 i2)
-    (Term_Atom name1, Term_Atom name2)        -> if name1 == name2 then Just as else Nothing
-    (Term_Comp subs1, Term_Comp subs2)        ->
-      if not (length subs1 == length subs2) then Nothing
-      else
-      let actions = map (uncurry _alphaEq) $ zip subs1 subs2
-      in foldl (>>=) (Just as) actions
-    (Term_Lambda vars1 sub1, Term_Lambda vars2 sub2)  -> _alphaEq sub1 sub2 $ asAddBounds as vars1 vars2
-    _                                         -> Nothing
-
-alphaEq :: Term -> Term -> Bool
-alphaEq t1 t2 =
-  let t1' = termMinimizeIndices t1
-      t2' = termRepel [t1] t2
-  in isJust $ _alphaEq t1' t2' asInit
-
-
-
--- substitution (for free variables)
+-- substitution
 
 _substitute :: Variable -> Term -> Term -> Term
 _substitute v t tgt =
@@ -224,16 +187,75 @@ _substituteMany mapping tgt =
   case tgt of
     Term_Var name i       -> Map.findWithDefault tgt (Var name i) mapping
     Term_Atom _           -> tgt
-    Term_Comp subs        -> Term_Comp $ map (substituteMany mapping) subs
+    Term_Comp subs        -> Term_Comp $ map (_substituteMany mapping) subs
     Term_Lambda vars sub  ->
       let mapping1 = Set.foldr Map.delete mapping vars
-      in Term_Lambda vars $ substituteMany mapping1 sub
+      in Term_Lambda vars $ _substituteMany mapping1 sub
 
 substituteMany :: Map.Map Variable Term -> Term -> Term
-substituteMany mapping tgt = termMergeLambdas $ _substituteMany mapping (termRepel (Map.elems mapping) tgt)
+substituteMany mapping tgt = termMergeLambdas $ _substituteMany  mapping (termRepel (Map.elems mapping) tgt)
 
 termSubMany :: Term -> Map.Map Variable Term -> Term
 termSubMany = flip substituteMany
+
+
+
+-- canonical form of terms
+
+_massRename :: Map.Map Variable Variable -> Term -> Term
+_massRename mapping tgt =
+  case tgt of
+    Term_Var name i       -> varToTerm $ Map.findWithDefault v v mapping where v = Var name i
+    Term_Atom _           -> tgt
+    Term_Comp subs        -> Term_Comp $ map (_massRename mapping) subs
+    Term_Lambda vars sub  ->
+      let vars1 = Set.map (\v -> Map.findWithDefault v v mapping) vars
+      in Term_Lambda vars1 $ _massRename mapping sub
+
+collectBoundVars :: [Variable] -> Term -> [Variable]
+collectBoundVars ls t =
+  case t of
+    Term_Lambda vars sub  -> collectBoundVars (Set.elems vars ++ ls) sub
+    Term_Comp subs        -> foldl collectBoundVars ls subs
+    _                     -> ls
+
+termCanonMap :: Term -> Map.Map Variable Variable
+termCanonMap t =
+  let varList = collectBoundVars [] t
+      tmp1 = map swap $ indexed varList
+      tmp2 = map (\(v, i) -> (v, Var "X" i)) tmp1
+  in Map.fromList tmp2
+
+termCanon :: Term -> Term
+termCanon t = _massRename (termCanonMap t') t' where t' = termNormalize t
+
+
+
+-- term ordering and Eq (alpha equivalence / ordering)
+
+termLevel :: Term -> Int
+termLevel (Term_Var _ _) = 0
+termLevel (Term_Atom _) = 1
+termLevel (Term_Comp _) = 2
+termLevel (Term_Lambda _ _) = 3
+
+termSimpleCmp :: Term -> Term -> Ordering
+termSimpleCmp t1 t2
+  | let tLv1 = termLevel t1
+        tLv2 = termLevel t2,
+    not (tLv1 == tLv2) = tLv1 `compare` tLv2
+  | otherwise =
+      case (t1, t2) of
+        (Term_Var name1 i1, Term_Var name2 i2)              -> (name1, i1) `compare` (name2, i2)
+        (Term_Atom name1, Term_Atom name2)                  -> name1 `compare` name2
+        (Term_Comp subs1, Term_Comp subs2)                  -> subs1 `compare` subs2
+        (Term_Lambda vars1 subs1, Term_Lambda vars2 subs2)  -> (vars1, subs1) `compare` (vars2, subs2)
+
+instance Eq Term where
+  (==) t1 t2 = (termSimpleCmp (termCanon t1) (termCanon t2) == EQ)
+
+instance Ord Term where
+  compare t1 t2 = termSimpleCmp (termCanon t1) (termCanon t2)
 
 
 
@@ -242,7 +264,7 @@ termSubMany = flip substituteMany
 data PmState = PmState {
   pmFvars :: VarSet,
   pmMapping :: Map.Map Variable Term
-} deriving Show
+}
 
 pmInit :: VarSet -> PmState
 pmInit vars = PmState vars Map.empty
@@ -253,7 +275,7 @@ updatePm v t pm@(PmState fvars0 mapping0)
   | not (v `Map.member` mapping0) = Just $ pm { pmMapping = Map.insert v t mapping0 }
   | otherwise =
       let t2 = mapping0 Map.! v
-      in if t `alphaEq` t2 then Just pm else Nothing
+      in if t == t2 then Just pm else Nothing
 
 _patternMatch :: Term -> Term -> PmState -> Maybe PmState
 _patternMatch (Term_Var name1 i1) t2 = updatePm (Var name1 i1) t2
@@ -271,105 +293,11 @@ _patternMatch _ _ = const Nothing
 
 patternMatch :: Term -> Term -> Maybe (Map.Map Variable Term)
 patternMatch t1 t2 = do
-  let t1' = termNormalize t1
-      t2' = termNormalize t2
-  pm <- _patternMatch t1' t2' (pmInit $ termFreeVars t1')
+  pm <- _patternMatch t1 t2 (pmInit $ termFreeVars t1)
   let mapping = pmMapping pm
-      t1'' = termSubMany t1' mapping
-  if t1'' `alphaEq` t2'
+      t1' = termSubMany t1 mapping
+  if t1' == t2
     then Just mapping
     else Nothing
 
-{-
--- unification
-
-occursCheck :: Variable -> Term -> Bool
-occursCheck v t
-  | (Just v == termToVar t) = False
-  | otherwise = v `Set.member` termFreeVars t
-
-data EqState = EqState {
-  freeVars :: VarSet,
-  eqs :: Seq.Seq (Term, Term),
-  mapping :: Map.Map Variable Term,
-  failed :: Bool
-}
-
-eqsInit :: [(Term, Term)] -> EqState
-eqsInit eqs = EqState (Seq.fromList eqs) Map.empty False
-
-eqsFinished :: EqState -> Bool
-eqsFinished (EqState eqs0 _ failed0) = (Seq.length eqs0 == 0 || failed0)
-
-unAddMapping :: Variable -> Term -> EqState -> EqState
-unAddMapping v t state@(EqState eqs0 mapping0 _)
-  | (Just v == termToVar t) = state
-  | otherwise =
-    let eqs1 = fmap (mapPair $ substitute v t) eqs0
-        mapping1 = Map.insert v t $ Map.map (substitute v t) mapping0
-    in state { eqs = eqs1, mapping = mapping1 }
-
-pmAddMapping :: Variable -> Term -> EqState -> EqState
-pmAddMapping v t state@(EqState _ mapping0 _)
-  | let currMapping = Map.lookup v mapping0,
-    not (currMapping == Nothing) =
-      if currMapping == Just t then state
-      else state { failed = True }
-  | otherwise = state { mapping = Map.insert v t mapping0 }
-
-type EqStep = Term -> Term -> EqState -> EqState
-
-compStep :: EqStep
-compStep (Term_Atom lname) (Term_Atom rname) state = state { failed = not (lname == rname) }
-compStep (Term_Comp lsubs) (Term_Comp rsubs) state@(EqState eqs0 _ _)
-  | not (length lsubs == length rsubs) = state { failed = True }
-  | otherwise = state { eqs = eqs0 Seq.>< (Seq.fromList $ zip lsubs rsubs) }
-compStep _ _ state = state { failed = True }
-
-unStep :: EqStep
-unStep left right state
-  | (termIsVar left) =
-    let lvar = fromJust $ termToVar left
-    in
-    if (not $ occursCheck lvar right) then unAddMapping lvar right state
-    else state { failed = True }
-  | (termIsVar right) = unStep right left state
-  | otherwise = compStep left right state
-
-pmStep :: EqStep
-pmStep left right state
-  | (termIsVar left) = pmAddMapping (fromJust $ termToVar left) right state
-  | (termIsVar right) = state { failed = True }
-  | otherwise = compStep left right state
-
-eqsRecurse :: EqStep -> EqState -> EqState
-eqsRecurse step state@(EqState eqs0 _ _)
-  | eqsFinished state = state
-  | otherwise =
-    let (left, right) = fromJust $ Seq.lookup 0 eqs0
-        state1 = state { eqs = Seq.drop 1 eqs0 }
-    in eqsRecurse step $ step left right state1
-
-type EqMapping = Maybe (Map.Map Variable Term)
-
-eqsToRes :: EqState -> EqMapping
-eqsToRes state@(EqState _ mapping0 failed0)
-  | failed0 = Nothing
-  | otherwise = Just mapping0
-
-eqsSolve :: EqStep -> [(Term, Term)] -> EqMapping
-eqsSolve step eqs = eqsToRes $ eqsRecurse step (eqsInit eqs)
-
-unifyMany :: [(Term, Term)] -> EqMapping
-unifyMany = eqsSolve unStep
-
-patternMatchMany :: [(Term, Term)] -> EqMapping
-patternMatchMany = eqsSolve pmStep
-
-unify :: Term -> Term -> EqMapping
-unify left right = unifyMany [(left, right)]
-
-patternMatch :: Term -> Term -> EqMapping
-patternMatch left right = patternMatchMany [(left, right)]
-
--}
+patternMatch_safe t1 t2 = patternMatch (termNormalize t1) (termNormalize t2)
