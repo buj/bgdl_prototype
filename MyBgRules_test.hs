@@ -39,3 +39,9 @@ kb4 =
     termLolli (tatom "a") (tatom "b"),
     termLolli (tatom "a") (tatom "c")
   ]
+
+kb5 =
+  [
+    tcomp [tatom "bullshit", tatom "a"],
+    termLolli (tcomp [tatom "bullshit", tvarnum 0]) (tcomp [tatom "haha", tvarnum 0])
+  ]
