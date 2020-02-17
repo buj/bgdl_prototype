@@ -1,4 +1,5 @@
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE RankNTypes #-}
 
 module MyEngine where
 
@@ -6,6 +7,7 @@ import Data.Maybe
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Set.Monad as Mset
+import qualified Debug.Trace as Debug
 
 import MyTerms
 import qualified MyUtil as Mutil
@@ -26,7 +28,7 @@ termDrop pref (Term_Comp ((Term_Atom ('#':cand)):t:[]))
 termDrop _ _ = Nothing
 
 termHasPref :: String -> Term -> Bool
-termHasPref pref = isNothing . (termDrop pref)
+termHasPref pref = isJust . (termDrop pref)
 
 termGoal = termPrefix "goal"
 termFromGoal = termDrop "goal"
@@ -54,8 +56,12 @@ termConnective conn t1 t2 = Term_Comp [t1, Term_Atom ('#':conn), t2]
 
 sidesFrom :: String -> Term -> Maybe (Term, Term)
 sidesFrom conn (Term_Comp (lhs:(Term_Atom mid):rhs:[]))
-  | (mid == conn) = Just (lhs, rhs)
+  | (mid == ('#':conn)) = Just (lhs, rhs)
   | otherwise = Nothing
+sidesFrom _ _ = Nothing
+
+termIsConn :: String -> Term -> Bool
+termIsConn conn t = isJust $ sidesFrom conn t
 
 lhsFrom :: String -> Term -> Maybe Term
 lhsFrom conn t = fst <$> sidesFrom conn t
@@ -67,29 +73,38 @@ subsFrom :: String -> Term -> Maybe [Term]
 subsFrom conn (Term_Comp (t1:(Term_Atom mid):t2:[]))
   | (mid == conn) = Just [t1, t2]
   | otherwise = Nothing
+subsFrom _ _ = Nothing
 
-termSub = termConnective "sub"
 termImp = termConnective "==>"
 termAnd = termConnective "and"
 termOr = termConnective "or"
 
+termIsImp = termIsConn "==>"
+termIsAnd = termIsConn "and"
+termIsOr = termIsConn "or"
 
 
 -- rules
 
-data Production = Produce_Term Term | Produce_Rule Rule | Retract deriving (Eq, Ord)
+data Production = Produce_Term Term | Produce_Rule Rule | Retract deriving (Eq, Ord, Show)
 
 data Auto = Auto { autoId :: Term, autoProds :: [Production] }
 data Trigger =  Trigger {
-  trigId :: Term, trigEye :: TermKey,
+  trigId :: Term, trigKey :: TermKey,
   trigSee :: Term -> [Production], trigProds :: [Production]
 }
+
+instance Show Auto where
+  show (Auto name _) = show name
 
 instance Eq Auto where
   (==) (Auto name1 _) (Auto name2 _) = name1 == name2
 
 instance Ord Auto where
   (<=) (Auto name1 _) (Auto name2 _) = name1 <= name2
+
+instance Show Trigger where
+  show (Trigger name _ _ _) = show name
 
 instance Eq Trigger where
   (==) (Trigger name1 _ _ _) (Trigger name2 _ _ _) = name1 == name2
@@ -110,13 +125,12 @@ ruleId :: Rule -> Term
 ruleId (Rule_Auto (Auto name _)) = name
 ruleId (Rule_Trig (Trigger name _ _ _)) = name
 
-autoKey = termKey . autoId
-trigKey = termKey . trigId
-ruleKey = termKey . ruleId
-
 ruleAutos :: Rule -> [Production]
 ruleAutos (Rule_Auto (Auto _ prods)) = prods
 ruleAutos (Rule_Trig (Trigger _ _ _ prods)) = prods
+
+instance Show Rule where
+  show r = show $ ruleId r
 
 instance Eq Rule where
   (==) r1 r2 = ruleId r1 == ruleId r2
@@ -136,6 +150,15 @@ chainRule ts@(t:tail)
       in  trigRule rname (termKey tcore) (
             \cand -> maybeToList $ patternMatch tcore cand >> Just Retract
           ) [Produce_Rule (chainRule tail)]
+  | (termIsAnd t) =
+      let (lsub, rsub) = fromJust $ sidesFrom "and" t
+      in  autoRule rname [Produce_Rule $ chainRule (lsub:rsub:tail)]
+  | (termIsOr t) =
+      let (lsub, rsub) = fromJust $ sidesFrom "or" t
+      in  autoRule rname [
+            Produce_Rule $ chainRule (lsub:tail),
+            Produce_Rule $ chainRule (rsub:tail)
+          ]
   | otherwise =
       trigRule rname (termKey t) (
         \cand -> maybeToList $ do
@@ -144,36 +167,8 @@ chainRule ts@(t:tail)
       ) []
   where rname = termChain ts
 
-goalIntro =
-  chainRule [termImp (tvarnum 0) (tvarnum 1), termGoal (tvarnum 0)]
-
 impElim =
   chainRule [termImp (tvarnum 0) (tvarnum 1), tvarnum 0, tvarnum 1]
-
-andIntro = 
-  chainRule [termGoal conj, tvarnum 0, tvarnum 1, conj]
-  where conj = termAnd (tvarnum 0) (tvarnum 1)
-
-orIntro1 =
-  chainRule [termGoal disj, tvarnum 0, disj]
-  where disj = termOr (tvarnum 0) (tvarnum 1)
-
-orIntro2 =
-  chainRule [termGoal disj, tvarnum 1, disj]
-  where disj = termOr (tvarnum 0) (tvarnum 1)
-
-contraIntro =
-  chainRule [termNot (tvarnum 0), tvarnum 0, termContra]
-
-basicRules =
-  [
-    goalIntro,
-    impElim,
-    andIntro,
-    orIntro1,
-    orIntro2,
-    contraIntro
-  ]
 
 
 
@@ -191,6 +186,9 @@ data EngineState =
     esWatchers :: Watchers,
     esSuccs ::    Succs
   }
+
+instance Show EngineState where
+  show es@(EState terms _ _ _ _) = show (Set.elems terms)
 
 instance Eq EngineState where
   (==) es1 es2 = (esTerms es1 == esTerms es2)
@@ -223,7 +221,8 @@ watsRemove wats (Rule_Trig trig) = Map.adjust (Set.delete trig) (trigKey trig) w
 watsRemove wats _ = wats
 
 watsGet :: Watchers -> TermKey -> Set.Set Trigger
-watsGet wats k = Map.findWithDefault Set.empty k wats
+watsGet wats k =
+  Set.unions $ map (\ksub -> Map.findWithDefault Set.empty ksub wats) (_termKeySub k)
 
 succsAdd :: Succs -> Term -> Production -> Succs
 succsAdd succs rname p = Mutil.adjustOrInsert (p:) [p] rname succs
@@ -296,16 +295,27 @@ esConsumeTerm es@(EState _ pending _ _ _) t
 esStep :: EngineState -> Mset.Set EngineState
 esStep es@(EState _ pending _ _ _) = Mset.fromList $ map (esConsumeTerm es) (Set.elems pending)
 
-fixMset :: Ord a => (a -> Mset.Set a) -> (Mset.Set a, Mset.Set a) -> Mset.Set a
-fixMset f (past, curr)
+data FxState a =
+  FxState {
+    fxAll :: Ord a => Mset.Set a,
+    fxHistory :: Ord a => [Mset.Set a],
+    fxCurr :: Ord a => Mset.Set a
+  }
+
+fxInit :: Ord a => a -> FxState a
+fxInit x = FxState Mset.empty [] (Mset.singleton x)
+
+fixMset :: Ord a => (a -> Mset.Set a) -> FxState a -> FxState a
+fixMset f fs@(FxState past hist curr)
   | not (Mset.size curr == 0) =
       let npast = past `Mset.union` curr
+          nhist = curr:hist
           ncurr = (curr >>= f) `Mset.difference` npast
-      in fixMset f (npast, ncurr)
-  | otherwise = past
+      in fixMset f (FxState npast nhist ncurr)
+  | otherwise = fs
 
-esFix :: EngineState -> Mset.Set EngineState
-esFix es = fixMset esStep (Mset.empty, Mset.singleton es)
+esFix :: EngineState -> FxState EngineState
+esFix es = fixMset esStep (fxInit es)
 
 
 -- engine: convenience functions
@@ -318,3 +328,6 @@ esInitRules = esAddRules esEmpty
 
 esAddTerms :: EngineState -> [Term] -> EngineState
 esAddTerms = foldl esAddTerm
+
+instance (Ord a, Show a) => Show (FxState a) where
+  show (FxState _ hist _) = foldr (\x str -> Mutil.lsShowPretty x ++ ('\n':str)) "" $ map Mset.elems (reverse hist)

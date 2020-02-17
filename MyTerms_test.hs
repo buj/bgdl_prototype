@@ -1,4 +1,4 @@
-module MyTest where
+module MyTerms_test where
 
 import qualified Data.Set as Set
 

@@ -90,6 +90,9 @@ tvarstr = varToTerm . varstr
 tatom :: String -> Term
 tatom = Term_Atom
 
+tcomp :: [Term] -> Term
+tcomp = Term_Comp
+
 
 
 -- term structure manipulation/inspection
@@ -132,6 +135,7 @@ termKey _ = []
 _termKeySub :: TermKey -> [TermKey]
 _termKeySub (Nothing:tail) = map (Nothing:) $ _termKeySub tail
 _termKeySub (t:tail) = _termKeySub tail >>= (\key -> [Nothing:key, t:key])
+_termKeySub _ = [[]]
 
 termKeySubs :: Term -> [TermKey]
 termKeySubs = _termKeySub . termKey
