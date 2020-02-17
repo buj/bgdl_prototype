@@ -77,7 +77,7 @@ termOr = termConnective "or"
 
 -- rules
 
-data Production = Produce_Term Term | Produce_Rule Rule | Retract
+data Production = Produce_Term Term | Produce_Rule Rule | Retract deriving (Eq, Ord)
 
 data Auto = Auto { autoId :: Term, autoProds :: [Production] }
 data Trigger =  Trigger {
@@ -97,7 +97,8 @@ instance Eq Trigger where
 instance Ord Trigger where
   (<=) (Trigger name1 _ _ _) (Trigger name2 _ _ _) = name1 <= name2
 
-data Rule = Rule_Auto Auto | Rule_Trig Trigger deriving (Eq, Ord)
+
+data Rule = Rule_Auto Auto | Rule_Trig Trigger
 
 autoRule :: Term -> [Production] -> Rule
 autoRule t ps = Rule_Auto $ Auto t ps
@@ -116,6 +117,12 @@ ruleKey = termKey . ruleId
 ruleAutos :: Rule -> [Production]
 ruleAutos (Rule_Auto (Auto _ prods)) = prods
 ruleAutos (Rule_Trig (Trigger _ _ _ prods)) = prods
+
+instance Eq Rule where
+  (==) r1 r2 = ruleId r1 == ruleId r2
+
+instance Ord Rule where
+  (<=) r1 r2 = ruleId r1 <= ruleId r2
 
 
 termChain :: [Term] -> Term
@@ -158,13 +165,23 @@ orIntro2 =
 contraIntro =
   chainRule [termNot (tvarnum 0), tvarnum 0, termContra]
 
+basicRules =
+  [
+    goalIntro,
+    impElim,
+    andIntro,
+    orIntro1,
+    orIntro2,
+    contraIntro
+  ]
 
 
--- engine
+
+-- engine: basics
 
 type KeyMap = Map.Map TermKey [Term]
 type Watchers = Map.Map TermKey (Set.Set Trigger)
-type Succs = Map.Map Rule [Production]
+type Succs = Map.Map Term [Production]
 
 data EngineState =
   EState {
@@ -187,57 +204,88 @@ esEmpty = EState Set.empty Set.empty Map.empty Map.empty Map.empty
 esIsFixed :: EngineState -> Bool
 esIsFixed es = Set.size (esPending es) == 0
 
-esK_add :: KeyMap -> Term -> KeyMap
-esK_add kmap t =
+kmapAdd :: KeyMap -> Term -> KeyMap
+kmapAdd kmap t =
   foldl (\m key -> Mutil.adjustOrInsert (t:) [t] key m) kmap $ termKeySubs t
 
-esW_addTrig :: Watchers -> Trigger -> Watchers
-esW_addTrig wats trig = Mutil.adjustOrInsert (Set.insert trig) (Set.singleton trig) (trigKey trig) wats
+kmapGet :: KeyMap -> TermKey -> [Term]
+kmapGet kmap k = Map.findWithDefault [] k kmap
 
-esW_add :: Watchers -> Rule -> Watchers
-esW_add wats (Rule_Trig trig) = esW_addTrig wats trig
-esW_add wats _ = wats
+watsAddTrig :: Watchers -> Trigger -> Watchers
+watsAddTrig wats trig = Mutil.adjustOrInsert (Set.insert trig) (Set.singleton trig) (trigKey trig) wats
 
-esW_remove :: Watchers -> Rule -> Watchers
-esW_remove wats (Rule_Trig trig) = Map.adjust (Set.delete trig) (trigKey trig) wats
-esW_remove wats _ = wats
+watsAdd :: Watchers -> Rule -> Watchers
+watsAdd wats (Rule_Trig trig) = watsAddTrig wats trig
+watsAdd wats _ = wats
 
-esS_add :: Succs -> Rule -> Production -> Succs
-esS_add succs r p = Mutil.adjustOrInsert (p:) [p] r succs
+watsRemove :: Watchers -> Rule -> Watchers
+watsRemove wats (Rule_Trig trig) = Map.adjust (Set.delete trig) (trigKey trig) wats
+watsRemove wats _ = wats
 
+watsGet :: Watchers -> TermKey -> Set.Set Trigger
+watsGet wats k = Map.findWithDefault Set.empty k wats
+
+succsAdd :: Succs -> Term -> Production -> Succs
+succsAdd succs rname p = Mutil.adjustOrInsert (p:) [p] rname succs
+
+succsGet :: Succs -> Term -> [Production]
+succsGet succs rname = Map.findWithDefault [] rname succs
+
+
+
+-- engine behaviour
 
 esRetract :: EngineState -> Production -> EngineState
 esRetract es@(EState _ pending _ _ succs) p =
   case p of
     Produce_Term t  -> es { esPending = Set.delete t pending }
     Produce_Rule r  ->
-      let prods = Map.findWithDefault [] r succs
+      let rname = ruleId r
+          prods = succs `succsGet` rname
           es'@(EState _ _ _ wats' succs') = foldl esRetract es prods
       in es' {
-        esWatchers = esW_remove wats' r,
-        esSuccs = Map.delete r succs'
+        esWatchers = wats' `watsRemove` r,
+        esSuccs = Map.delete rname succs'
       }
 
-{-
-esTriggerInstance :: EngineState -> Rule -> Term -> EngineState
-esTriggerRule :: EngineState -> Rule -> EngineState
+
+esTriggerInstance :: EngineState -> Trigger -> Term -> EngineState
+esTriggerTrig :: EngineState -> Trigger -> EngineState
 esTriggerTerm :: EngineState -> Term -> EngineState
 
 esAddProd :: EngineState -> Rule -> Production -> EngineState
 esAddRule :: EngineState -> Rule -> EngineState
 esAddTerm :: EngineState -> Term -> EngineState
 
-esRuleAuto :: EngineState -> Rule -> EngineState
-esRuleAuto es r@(Rule _ _ autos) = foldl (flip esAddProd $ r) es autos
+esAddProds :: EngineState -> Rule -> [Production] -> EngineState
+esAddProds es r prods = foldl (flip esAddProd $ r) es prods
 
-esTriggerInstance es r@(Rule name (Just (Trigger _ see)) _) t =
+esAuto :: EngineState -> Rule -> EngineState
+esAuto es r = esAddProds es r $ ruleAutos r
 
-esAddProd es@(EState _ pending _ _ esS) r p =
-  let es' = es { esSuccs = esS_add esS r p }
+esTriggerInstance es trig@(Trigger _ _ see _) t = esAddProds es (Rule_Trig trig) $ see t
+esTriggerTrig es@(EState _ _ kmap _ _) trig =
+  foldl (flip esTriggerInstance $ trig) es (kmap `kmapGet` (trigKey trig))
+esTriggerTerm es@(EState _ _ _ wats _) t =
+  foldl (\es trig -> esTriggerInstance es trig t) es (wats `watsGet` (termKey t))
+
+esAddProd es@(EState _ pending _ _ succs) r p =
+  let rname = ruleId r
+      es' = es { esSuccs = succsAdd succs rname p }
   in case p of
     Produce_Term tgt  -> es' { esPending = Set.insert tgt pending }
     Produce_Rule tgt  -> esAddRule es' tgt
     Retract           -> esRetract es (Produce_Rule r)
+
+esAddRule es r =
+  let es1@(EState _ _ _ wats1 _) = esAuto es r
+      es2 = es1 { esWatchers = wats1 `watsAdd` r }
+  in case r of
+    Rule_Trig trig  -> es2 `esTriggerTrig` trig
+    _               -> es2
+
+esAddTerm es@(EState ts _ kmap _ _) t =
+  esTriggerTerm (es { esTerms = Set.insert t ts, esKeys = kmap `kmapAdd` t }) t
 
 
 esConsumeTerm :: EngineState -> Term -> EngineState
@@ -246,16 +294,27 @@ esConsumeTerm es@(EState _ pending _ _ _) t
   | otherwise = es
 
 esStep :: EngineState -> Mset.Set EngineState
-esStep es@(EState _ pending _ _ _) = Set.map (esConsumeTerm es) pending
+esStep es@(EState _ pending _ _ _) = Mset.fromList $ map (esConsumeTerm es) (Set.elems pending)
 
-fixMset :: (a -> Mset.Set a) -> (Mset.Set a, Mset.Set a) -> Mset.Set a
+fixMset :: Ord a => (a -> Mset.Set a) -> (Mset.Set a, Mset.Set a) -> Mset.Set a
 fixMset f (past, curr)
-  | not (Set.size curr == 0) =
-      let npast = past `Set.union` curr
-          ncurr = (curr >>= f) `Set.difference` npast
-      in fixSet f (npast, ncurr)
+  | not (Mset.size curr == 0) =
+      let npast = past `Mset.union` curr
+          ncurr = (curr >>= f) `Mset.difference` npast
+      in fixMset f (npast, ncurr)
   | otherwise = past
 
 esFix :: EngineState -> Mset.Set EngineState
-esFix es = fixSet esStep (Set.empty, Set.singleton es)
--}
+esFix es = fixMset esStep (Mset.empty, Mset.singleton es)
+
+
+-- engine: convenience functions
+
+esAddRules :: EngineState -> [Rule] -> EngineState
+esAddRules = foldl esAddRule
+
+esInitRules :: [Rule] -> EngineState
+esInitRules = esAddRules esEmpty
+
+esAddTerms :: EngineState -> [Term] -> EngineState
+esAddTerms = foldl esAddTerm
