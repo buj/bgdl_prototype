@@ -132,13 +132,17 @@ termKey :: Term -> TermKey
 termKey (Term_Comp subs) = map termOnlyGround subs
 termKey _ = []
 
-_termKeySub :: TermKey -> [TermKey]
-_termKeySub (Nothing:tail) = map (Nothing:) $ _termKeySub tail
-_termKeySub (t:tail) = _termKeySub tail >>= (\key -> [Nothing:key, t:key])
-_termKeySub _ = [[]]
+_tkSubs :: TermKey -> [TermKey]
+_tkSubs (Nothing:tail) = map (Nothing:) $ _tkSubs tail
+_tkSubs (t:tail) = _tkSubs tail >>= (\key -> [Nothing:key, t:key])
+_tkSubs _ = [[]]
 
-termKeySubs :: Term -> [TermKey]
-termKeySubs = _termKeySub . termKey
+tkSubs :: TermKey -> [TermKey]
+tkSubs [] = [[]]
+tkSubs key = []:(_tkSubs key)
+
+termTkSubs :: Term -> [TermKey]
+termTkSubs = tkSubs . termKey
 
 
 vbGetNext :: VarBank -> String -> Variable
