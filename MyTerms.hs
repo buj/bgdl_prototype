@@ -73,6 +73,25 @@ instance Show Term where
 
 
 
+-- convenience functions (for fast typing)
+
+varnum :: Int -> Variable
+varnum i = Var "X" i
+
+varstr :: String -> Variable
+varstr s = Var s 0
+
+tvarnum :: Int -> Term
+tvarnum = varToTerm . varnum
+
+tvarstr :: String -> Term
+tvarstr = varToTerm . varstr
+
+tatom :: String -> Term
+tatom = Term_Atom
+
+
+
 -- term structure manipulation/inspection
 
 type VarSet = Set.Set Variable
@@ -106,9 +125,9 @@ termOnlyGround t
 
 type TermKey = [Maybe Term]
 
-termSignature :: Term -> TermKey
-termSignature (Term_Comp subs) = map termOnlyGround subs
-termSignature _ = []
+termSgn :: Term -> TermKey
+termSgn (Term_Comp subs) = map termOnlyGround subs
+termSgn _ = []
 
 
 vbGetNext :: VarBank -> String -> Variable
@@ -223,7 +242,7 @@ termCanonMap :: Term -> Map.Map Variable Variable
 termCanonMap t =
   let varList = collectBoundVars [] t
       tmp1 = map swap $ indexed varList
-      tmp2 = map (\(v, i) -> (v, Var "X" i)) tmp1
+      tmp2 = map (\(v, i) -> (v, varnum i)) tmp1
   in Map.fromList tmp2
 
 termCanon :: Term -> Term
