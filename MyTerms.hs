@@ -10,7 +10,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 
-import MyUtil
+import qualified MyUtil as Mutil
 
 
 
@@ -125,9 +125,16 @@ termOnlyGround t
 
 type TermKey = [Maybe Term]
 
-termSgn :: Term -> TermKey
-termSgn (Term_Comp subs) = map termOnlyGround subs
-termSgn _ = []
+termKey :: Term -> TermKey
+termKey (Term_Comp subs) = map termOnlyGround subs
+termKey _ = []
+
+_termKeySub :: TermKey -> [TermKey]
+_termKeySub (Nothing:tail) = map (Nothing:) $ _termKeySub tail
+_termKeySub (t:tail) = _termKeySub tail >>= (\key -> [Nothing:key, t:key])
+
+termKeySubs :: Term -> [TermKey]
+termKeySubs = _termKeySub . termKey
 
 
 vbGetNext :: VarBank -> String -> Variable
