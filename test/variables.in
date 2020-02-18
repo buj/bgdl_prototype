@@ -1,0 +1,2 @@
+(green apple)
+((green ?x) ==> (good ?x))

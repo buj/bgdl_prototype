@@ -16,5 +16,5 @@ adjustOrInsert f dfl = Map.alter (adjustOrInsertFunc f dfl)
 insertIfAbsent :: Ord k => k -> a -> Map.Map k a -> Map.Map k a
 insertIfAbsent = Map.insertWith (flip const)
 
-lsShowPretty :: Show a => [a] -> String
-lsShowPretty ls = foldr1 (\x str -> x ++ (", " ++ str)) (map show ls)
+lsWithSep :: Show a => String -> [a] -> String
+lsWithSep sep ls = foldr1 (\x str -> x ++ (sep ++ str)) (map show ls)

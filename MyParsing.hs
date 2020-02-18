@@ -9,7 +9,7 @@ import MyTerms
 
 readWhite :: String -> String
 readWhite str@(ch:rest)
-  | (isSpace ch) = rest
+  | (isSpace ch) = readWhite rest
   | otherwise = str
 readWhite "" = ""
 
@@ -19,9 +19,12 @@ readChar ch1 (ch2:rest)
   | otherwise = Nothing
 readChar _ _ = Nothing
 
+isGoodSymbol :: Char -> Bool
+isGoodSymbol ch = (isLetter ch) || (isNumber ch) || (ch `elem` ['-', '=', '>'])
+
 _parseName :: String -> String -> (String, String)
 _parseName acc str@(ch:rest)
-  | (isLetter ch) = _parseName (ch:acc) rest
+  | (isGoodSymbol ch) = _parseName (ch:acc) rest
   | otherwise = (reverse acc, str)
 _parseName acc "" = (reverse acc, "")
 
@@ -44,20 +47,23 @@ parseAtom str = do
 
 parseTerm :: String -> Maybe (Term, String)
 
-_parseComp :: [Term] -> String -> ([Term], String)
-_parseComp acc str =
+_parseTerms :: [Term] -> String -> ([Term], String)
+_parseTerms acc str =
   let mbyTerm = parseTerm str
   in  if isJust mbyTerm
       then  let (t1, rest) = fromJust mbyTerm
-            in  _parseComp (t1:acc) $ readWhite rest
+            in  _parseTerms (t1:acc) $ readWhite rest
       else  (reverse acc, str)
+
+parseTerms :: String -> ([Term], String)
+parseTerms = _parseTerms []
 
 parseComp :: String -> Maybe (Term, String)
 parseComp ('(':rest) =
-  let (ts, rest1) = _parseComp [] rest
+  let (ts, rest1) = _parseTerms [] $ readWhite rest
   in  if  ts == []  then Nothing
       else do
-        rest2 <- readChar ')' rest1
+        rest2 <- readChar ')' $ readWhite rest1
         return (Term_Comp ts, rest2)
 parseComp _ = Nothing
 

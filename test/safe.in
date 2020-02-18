@@ -1,0 +1,13 @@
+((woohoo ?x) ==> ?x)
+
+(woohoo
+  (woohoo
+    (woohoo
+      (woohoo
+        (woohoo
+          (woohoo blabla)
+        )
+      )
+    )
+  )
+)

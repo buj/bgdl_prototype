@@ -351,4 +351,4 @@ esInitRules :: [Rule] -> EngineState
 esInitRules = esAddRules esEmpty
 
 instance (Ord a, Show a) => Show (FxState a) where
-  show (FxState _ hist _) = foldr (\x str -> Mutil.lsShowPretty x ++ ('\n':str)) "" $ map Mset.elems (reverse hist)
+  show (FxState _ hist _) = foldr (\x str -> Mutil.lsWithSep ", " x ++ ('\n':str)) "" $ map Mset.elems (reverse hist)
