@@ -8,7 +8,6 @@ import Data.Ord
 import Data.Tuple
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Data.Sequence as Seq
 
 import qualified MyUtil as Mutil
 
