@@ -5,22 +5,26 @@ import MyEngine
 
 
 
+termProduced = termPrefix "+"
+termIsProduced = termHasPrefix "+"
+
 termLolli = termConn "--o"
 termIsLolli = termIsConn "--o"
 
-termPresent = termPrefix "present"
-termIsPresent = termHasPrefix "present"
+termConsumed = termPrefix "-"
+termIsConsumed = termHasPrefix "-"
 
-termConsumed = termPrefix "consumed"
-termIsConsumed = termHasPrefix "consumed"
-
-termApplied = termPrefix "applied"
-termIsApplied = termHasPrefix "applied"
+bgProduceRule =
+  chainRule [
+    termProduced $ tvarnum 0,
+    termNot $ (termConsumed $ tvarnum 0),
+    tvarnum 0
+  ]
 
 bgContraRule =
   chainRule [
     termConsumed $ tvarnum 0,
-    termPresent $ tvarnum 0,
+    tvarnum 0,
     termContra
   ]
 
@@ -29,9 +33,9 @@ bgImpRule =
       y = tvarnum 1
       impl = termImp x y
   in chainRule [
-    impl, termNot $ termConsumed impl,
-    x, termNot $ termConsumed x,
-    packAnd [y, termPresent impl, termPresent x]
+    impl, -- not $ termConsumed impl,
+    x, -- not $ termConsumed x,
+    termProduced y
   ]
 
 bgLolliRule =
@@ -39,13 +43,14 @@ bgLolliRule =
       y = tvarnum 1
       lolli = termLolli x y
   in chainRule [
-    lolli, termNot $ termConsumed lolli,
-    x, termNot $ termConsumed x,
-    packAnd [y, termPresent lolli, termConsumed x]
+    lolli, -- termNot $ termConsumed lolli,
+    termProduced x, termNot $ termConsumed x,
+    packAnd [termProduced y, termConsumed x]
   ]
 
 bgRules =
   [
+    bgProduceRule,
     bgContraRule,
     bgImpRule,
     bgLolliRule

@@ -17,4 +17,5 @@ insertIfAbsent :: Ord k => k -> a -> Map.Map k a -> Map.Map k a
 insertIfAbsent = Map.insertWith (flip const)
 
 lsWithSep :: Show a => String -> [a] -> String
+lsWithSep _ [] = ""
 lsWithSep sep ls = foldr1 (\x str -> x ++ (sep ++ str)) (map show ls)

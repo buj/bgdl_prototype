@@ -1,6 +1,6 @@
 module Main where
 
-import Data.Set.Monad as Mset
+import qualified Data.Set.Monad as Mset
 
 import qualified MyUtil as Mutil
 import MyTerms
@@ -17,6 +17,6 @@ main = do
   if not (rest == "")
     then putStrLn $ "Couldn't parse input, this remains:\n" ++ rest
     else
-      let es = (esInitRules bgRules) `esAddTerms` ts
+      let es = (esInitRules bgRules) `esAddTerms` (map termProduced ts)
           models = fxEsEdge $ esFix es
       in putStrLn $ Mutil.lsWithSep "\n" (Mset.elems models)
