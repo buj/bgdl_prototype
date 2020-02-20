@@ -1,0 +1,3 @@
+goblin
+(goblin ==> grenade)
+(grenade --o (goblin --o deadGoblin))
